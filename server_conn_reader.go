@@ -156,6 +156,8 @@ func (cr *serverConnReader) handleTunneling(in io.ReadWriter) (io.ReadWriter, er
 				return nil, err
 			}
 
+			cr.sc.xForwardedFor = req.Header.Get("X-Forwarded-For")
+
 			cr.sc.httpReadBuf = buf
 
 			err = cr.sc.s.handleHTTPChannel(sessionHandleHTTPChannelReq{

@@ -130,6 +130,7 @@ type ServerConn struct {
 	authNonce        string
 	httpReadBuf      *bufio.Reader
 	httpReadTunnelID string
+	xForwardedFor    string
 
 	// in
 	chRequest       chan readReq
@@ -159,6 +160,10 @@ func (sc *ServerConn) initialize() {
 // Close closes the ServerConn.
 func (sc *ServerConn) Close() {
 	sc.ctxCancel()
+}
+
+func (sc *ServerConn) XForwardedFor() string {
+	return sc.xForwardedFor
 }
 
 // NetConn returns the underlying net.Conn.

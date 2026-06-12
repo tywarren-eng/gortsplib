@@ -2,10 +2,12 @@ package gortsplib
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -147,6 +149,7 @@ func newClientTunnelHTTP(
 	if err != nil {
 		return nil, err
 	}
+	res.Body = io.NopCloser(bytes.NewReader(nil))
 	res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {
@@ -209,6 +212,7 @@ func newClientTunnelHTTP(
 	if err != nil {
 		return nil, err
 	}
+	res.Body = io.NopCloser(bytes.NewReader(nil))
 	res.Body.Close()
 
 	if res.StatusCode != http.StatusOK {

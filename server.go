@@ -419,7 +419,7 @@ func (s *Server) runInner() error {
 				req.sc.httpReadTunnelID = req.tunnelID
 				s.httpReadChannels[req.sc] = req.res
 			} else {
-				readChan, readChanRes := s.findHTTPReadChannel(req.sc, req.tunnelID)
+				readChan, readChanRes := s.findHTTPReadChannel(req.tunnelID)
 				if readChan == nil {
 					req.res <- fmt.Errorf("did not found a corresponding HTTP GET request")
 				} else {
@@ -427,11 +427,19 @@ func (s *Server) runInner() error {
 					close(readChanRes)
 					req.res <- errHTTPUpgraded
 
+					xForwardedFor := ""
+					if req.sc.xForwardedFor != "" &&
+						readChan.xForwardedFor != "" &&
+						req.sc.xForwardedFor == readChan.xForwardedFor {
+						xForwardedFor = req.sc.xForwardedFor
+					}
+
 					nconn := newServerHTTPTunnel(req.sc.nconn, req.sc.httpReadBuf, readChan.nconn)
 					sc := &ServerConn{
-						s:      s,
-						nconn:  nconn,
-						tunnel: TunnelHTTP,
+						s:             s,
+						nconn:         nconn,
+						tunnel:        TunnelHTTP,
+						xForwardedFor: xForwardedFor,
 					}
 					sc.initialize()
 					s.conns[sc] = struct{}{}
@@ -510,10 +518,9 @@ func (s *Server) StartAndWait() error {
 	return s.Wait()
 }
 
-func (s *Server) findHTTPReadChannel(writeChan *ServerConn, tunnelID string) (*ServerConn, chan error) {
+func (s *Server) findHTTPReadChannel(tunnelID string) (*ServerConn, chan error) {
 	for readChan, readChanRes := range s.httpReadChannels {
-		if readChan.remoteAddr.IP.Equal(writeChan.remoteAddr.IP) &&
-			readChan.httpReadTunnelID == tunnelID {
+		if readChan.httpReadTunnelID == tunnelID {
 			return readChan, readChanRes
 		}
 	}

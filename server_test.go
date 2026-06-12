@@ -1442,6 +1442,153 @@ func TestServerTunnelHTTP(t *testing.T) {
 	}
 }
 
+func TestServerTunnelHTTPXForwardedFor(t *testing.T) {
+	cases := []struct {
+		name     string
+		getXFF   string
+		postXFF  string
+		expected string
+	}{
+		{
+			name:     "matching single ip",
+			getXFF:   "198.51.100.10",
+			postXFF:  "198.51.100.10",
+			expected: "198.51.100.10",
+		},
+		{
+			name:    "missing on post",
+			getXFF:  "198.51.100.10",
+			postXFF: "",
+		},
+		{
+			name:    "missing on get",
+			getXFF:  "",
+			postXFF: "198.51.100.10",
+		},
+		{
+			name:    "mismatched values",
+			getXFF:  "198.51.100.10",
+			postXFF: "198.51.100.11",
+		},
+		{
+			name:     "matching multi hop",
+			getXFF:   "198.51.100.10, 10.0.0.2",
+			postXFF:  "198.51.100.10, 10.0.0.2",
+			expected: "198.51.100.10, 10.0.0.2",
+		},
+	}
+
+	for _, ca := range []string{"http", "https"} {
+		for _, tc := range cases {
+			t.Run(ca+"/"+tc.name, func(t *testing.T) {
+				xffSeen := make(chan string, 1)
+
+				s := &Server{
+					Handler: &testServerHandler{
+						onDescribe: func(ctx *ServerHandlerOnDescribeCtx) (*base.Response, *ServerStream, error) {
+							xffSeen <- ctx.Conn.XForwardedFor()
+							return &base.Response{
+								StatusCode: base.StatusNotFound,
+							}, nil, nil
+						},
+					},
+					RTSPAddress: "localhost:8554",
+				}
+
+				if ca == "https" {
+					cert, err := tls.X509KeyPair(serverCert, serverKey)
+					require.NoError(t, err)
+					s.TLSConfig = &tls.Config{Certificates: []tls.Certificate{cert}}
+				}
+
+				err := s.Start()
+				require.NoError(t, err)
+				defer s.Close()
+
+				nconn1, err := net.Dial("tcp", "localhost:8554")
+				require.NoError(t, err)
+				defer nconn1.Close()
+
+				if ca == "https" {
+					nconn1 = tls.Client(nconn1, &tls.Config{InsecureSkipVerify: true})
+				}
+
+				getXFF := ""
+				if tc.getXFF != "" {
+					getXFF = "X-Forwarded-For: " + tc.getXFF + "\r\n"
+				}
+
+				_, err = nconn1.Write([]byte(
+					"GET / HTTP/1.1\r\n" +
+						"Host: localhost:8554\r\n" +
+						"X-Sessioncookie: testtunid\r\n" +
+						"Accept: application/x-rtsp-tunnelled\r\n" +
+						getXFF +
+						"Content-Length: 30000\r\n" +
+						"\r\n",
+				))
+				require.NoError(t, err)
+
+				buf1 := bufio.NewReader(nconn1)
+				res, err := http.ReadResponse(buf1, nil)
+				require.NoError(t, err)
+				res.Body.Close()
+
+				nconn2, err := net.Dial("tcp", "localhost:8554")
+				require.NoError(t, err)
+				defer nconn2.Close()
+
+				if ca == "https" {
+					nconn2 = tls.Client(nconn2, &tls.Config{InsecureSkipVerify: true})
+				}
+
+				postXFF := ""
+				if tc.postXFF != "" {
+					postXFF = "X-Forwarded-For: " + tc.postXFF + "\r\n"
+				}
+
+				_, err = nconn2.Write([]byte(
+					"POST / HTTP/1.1\r\n" +
+						"Host: localhost:8554\r\n" +
+						"X-Sessioncookie: testtunid\r\n" +
+						"Content-Type: application/x-rtsp-tunnelled\r\n" +
+						postXFF +
+						"Content-Length: 30000\r\n" +
+						"\r\n",
+				))
+				require.NoError(t, err)
+
+				buf2 := bufio.NewReader(nconn2)
+				res, err = http.ReadResponse(buf2, nil)
+				require.NoError(t, err)
+				res.Body.Close()
+
+				co := conn.NewConn(bufio.NewReader(buf1), base64.NewEncoder(base64.StdEncoding, nconn2))
+				rres, err := writeReqReadRes(co, base.Request{
+					Method: base.Describe,
+					URL:    mustParseURL("rtsp://localhost:8554/teststream?param=value"),
+					Header: base.Header{
+						"CSeq": base.HeaderValue{"1"},
+					},
+				})
+				require.NoError(t, err)
+				require.Equal(t, base.StatusNotFound, rres.StatusCode)
+
+				select {
+				case xff := <-xffSeen:
+					if tc.expected == "" {
+						require.Empty(t, xff)
+					} else {
+						require.Equal(t, tc.expected, xff)
+					}
+				case <-time.After(2 * time.Second):
+					t.Fatal("did not receive XForwardedFor value from handler")
+				}
+			})
+		}
+	}
+}
+
 func TestServerTunnelWebSocket(t *testing.T) {
 	for _, ca := range []string{"ws", "wss"} {
 		t.Run(ca, func(t *testing.T) {

@@ -10,8 +10,9 @@ import (
 type clientReader struct {
 	c *Client
 
-	mutex                  sync.Mutex
-	allowInterleavedFrames bool
+	mutex                    sync.Mutex
+	allowInterleavedFrames   bool
+	suppressUnexpectedFrames bool
 
 	terminate chan struct{}
 
@@ -29,6 +30,12 @@ func (r *clientReader) setAllowInterleavedFrames(v bool) {
 	r.mutex.Lock()
 	defer r.mutex.Unlock()
 	r.allowInterleavedFrames = v
+}
+
+func (r *clientReader) setSuppressUnexpectedFrames(v bool) {
+	r.mutex.Lock()
+	defer r.mutex.Unlock()
+	r.suppressUnexpectedFrames = v
 }
 
 func (r *clientReader) close() {
@@ -71,7 +78,12 @@ func (r *clientReader) runInner() error {
 			r.mutex.Lock()
 
 			if !r.allowInterleavedFrames {
+				suppressUnexpectedFrames := r.suppressUnexpectedFrames
 				r.mutex.Unlock()
+
+				if suppressUnexpectedFrames {
+					continue
+				}
 				return liberrors.ErrClientUnexpectedFrame{}
 			}
 

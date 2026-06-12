@@ -407,7 +407,8 @@ type recordReq struct {
 }
 
 type pauseReq struct {
-	res chan clientRes
+	suppressUnexpectedFrames bool
+	res                      chan clientRes
 }
 
 type clientRes struct {
@@ -833,7 +834,7 @@ func (c *Client) runInner() error {
 			}
 
 		case req := <-c.chPause:
-			res, err := c.doPause()
+			res, err := c.doPause(req.suppressUnexpectedFrames)
 			req.res <- clientRes{res: res, err: err}
 
 			if c.mustClose {
@@ -2206,6 +2207,10 @@ func (c *Client) doPlay(ra *headers.Range) (*base.Response, error) {
 		return nil, err
 	}
 
+	if c.setuppedTransport.Protocol == ProtocolTCP && c.reader != nil {
+		c.reader.setSuppressUnexpectedFrames(false)
+	}
+
 	c.state = clientStatePlay
 	c.startTransportRoutines()
 	c.createWriter()
@@ -2357,7 +2362,7 @@ func (c *Client) Record() (*base.Response, error) {
 	}
 }
 
-func (c *Client) doPause() (*base.Response, error) {
+func (c *Client) doPause(suppressUnexpectedFrames bool) (*base.Response, error) {
 	err := c.checkState(map[clientState]struct{}{
 		clientStatePlay:   {},
 		clientStateRecord: {},
@@ -2386,6 +2391,10 @@ func (c *Client) doPause() (*base.Response, error) {
 		}
 	}
 
+	if c.setuppedTransport.Protocol == ProtocolTCP && c.reader != nil {
+		c.reader.setSuppressUnexpectedFrames(suppressUnexpectedFrames)
+	}
+
 	c.stopTransportRoutines()
 
 	switch c.state {
@@ -2401,15 +2410,27 @@ func (c *Client) doPause() (*base.Response, error) {
 // Pause sends a PAUSE request.
 // This can be called only after Play() or Record().
 func (c *Client) Pause() (*base.Response, error) {
+	return c.pause(false)
+}
+
+func (c *Client) pause(suppressUnexpectedFrames bool) (*base.Response, error) {
 	cres := make(chan clientRes)
 	select {
-	case c.chPause <- pauseReq{res: cres}:
+	case c.chPause <- pauseReq{suppressUnexpectedFrames: suppressUnexpectedFrames, res: cres}:
 		res := <-cres
 		return res.res, res.err
 
 	case <-c.done:
 		return nil, c.closeError
 	}
+}
+
+// PauseWithUnexpectedFramesSuppressed sends a PAUSE request.
+// This can be called only after Play() or Record().
+// Stray interleaved TCP frames received after PAUSE and before the next PLAY
+// are ignored instead of closing the connection.
+func (c *Client) PauseWithUnexpectedFramesSuppressed() (*base.Response, error) {
+	return c.pause(true)
 }
 
 // OnPacketRTPAny sets a callback that is called when a RTP packet is read from any setupped media.

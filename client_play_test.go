@@ -2701,6 +2701,177 @@ func TestClientPlayPausePlay(t *testing.T) {
 	}
 }
 
+func TestClientPauseSuppressUnexpectedFrames(t *testing.T) {
+	l, err := net.Listen("tcp", "localhost:8554")
+	require.NoError(t, err)
+	defer l.Close()
+
+	serverDone := make(chan struct{})
+	defer func() { <-serverDone }()
+
+	go func() {
+		defer close(serverDone)
+
+		nconn, err2 := l.Accept()
+		require.NoError(t, err2)
+		defer nconn.Close()
+		conn := conn.NewConn(bufio.NewReader(nconn), nconn)
+
+		req, err2 := conn.ReadRequest()
+		require.NoError(t, err2)
+		require.Equal(t, base.Options, req.Method)
+
+		err2 = conn.WriteResponse(&base.Response{
+			StatusCode: base.StatusOK,
+			Header: base.Header{
+				"Public": base.HeaderValue{strings.Join([]string{
+					string(base.Describe),
+					string(base.Setup),
+					string(base.Play),
+					string(base.Pause),
+				}, ", ")},
+			},
+		})
+		require.NoError(t, err2)
+
+		req, err2 = conn.ReadRequest()
+		require.NoError(t, err2)
+		require.Equal(t, base.Describe, req.Method)
+
+		medias := []*description.Media{testH264Media}
+
+		err2 = conn.WriteResponse(&base.Response{
+			StatusCode: base.StatusOK,
+			Header: base.Header{
+				"Content-Type": base.HeaderValue{"application/sdp"},
+				"Content-Base": base.HeaderValue{"rtsp://localhost:8554/teststream/"},
+			},
+			Body: mediasToSDP(medias),
+		})
+		require.NoError(t, err2)
+
+		req, err2 = conn.ReadRequest()
+		require.NoError(t, err2)
+		require.Equal(t, base.Setup, req.Method)
+
+		var inTH headers.Transport
+		err2 = inTH.Unmarshal(req.Header["Transport"])
+		require.NoError(t, err2)
+
+		err2 = conn.WriteResponse(&base.Response{
+			StatusCode: base.StatusOK,
+			Header: base.Header{
+				"Transport": headers.Transport{
+					Delivery:       ptrOf(headers.TransportDeliveryUnicast),
+					Protocol:       headers.TransportProtocolTCP,
+					InterleavedIDs: inTH.InterleavedIDs,
+				}.Marshal(),
+			},
+		})
+		require.NoError(t, err2)
+
+		req, err2 = conn.ReadRequest()
+		require.NoError(t, err2)
+		require.Equal(t, base.Play, req.Method)
+
+		err2 = conn.WriteResponse(&base.Response{
+			StatusCode: base.StatusOK,
+		})
+		require.NoError(t, err2)
+
+		err2 = conn.WriteInterleavedFrame(&base.InterleavedFrame{
+			Channel: 0,
+			Payload: testRTPPacketMarshaled,
+		}, make([]byte, 1024))
+		require.NoError(t, err2)
+
+		req, err2 = conn.ReadRequest()
+		require.NoError(t, err2)
+		require.Equal(t, base.Pause, req.Method)
+
+		err2 = conn.WriteResponse(&base.Response{
+			StatusCode: base.StatusOK,
+		})
+		require.NoError(t, err2)
+
+		burstTerminate := make(chan struct{})
+		burstDone := make(chan struct{})
+
+		go func() {
+			defer close(burstDone)
+
+			for {
+				select {
+				case <-burstTerminate:
+					return
+				default:
+				}
+
+				err3 := conn.WriteInterleavedFrame(&base.InterleavedFrame{
+					Channel: 0,
+					Payload: testRTPPacketMarshaled,
+				}, make([]byte, 1024))
+				if err3 != nil {
+					return
+				}
+			}
+		}()
+
+		req, err2 = conn.ReadRequest()
+		close(burstTerminate)
+		<-burstDone
+		require.NoError(t, err2)
+		require.Equal(t, base.Play, req.Method)
+
+		err2 = conn.WriteResponse(&base.Response{
+			StatusCode: base.StatusOK,
+		})
+		require.NoError(t, err2)
+
+		err2 = conn.WriteInterleavedFrame(&base.InterleavedFrame{
+			Channel: 0,
+			Payload: testRTPPacketMarshaled,
+		}, make([]byte, 1024))
+		require.NoError(t, err2)
+
+		req, err2 = conn.ReadRequest()
+		require.NoError(t, err2)
+		require.Equal(t, base.Teardown, req.Method)
+
+		err2 = conn.WriteResponse(&base.Response{
+			StatusCode: base.StatusOK,
+		})
+		require.NoError(t, err2)
+	}()
+
+	var framesReceived atomic.Int32
+
+	c := Client{
+		Protocol: ptrOf(ProtocolTCP),
+	}
+
+	err = readAll(&c, "rtsp://localhost:8554/teststream",
+		func(_ *description.Media, _ format.Format, _ *rtp.Packet) {
+			framesReceived.Add(1)
+		})
+	require.NoError(t, err)
+	defer c.Close()
+
+	require.Eventually(t, func() bool {
+		return framesReceived.Load() >= 1
+	}, time.Second, 10*time.Millisecond)
+
+	_, err = c.PauseWithUnexpectedFramesSuppressed()
+	require.NoError(t, err)
+
+	_, err = c.Play(nil)
+	require.NoError(t, err)
+
+	require.Eventually(t, func() bool {
+		return framesReceived.Load() >= 2
+	}, time.Second, 10*time.Millisecond)
+}
+
 func TestClientPlayRTCPReport(t *testing.T) {
 	reportReceived := make(chan struct{})
 

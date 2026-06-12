@@ -2861,7 +2861,7 @@ func TestClientPauseSuppressUnexpectedFrames(t *testing.T) {
 		return framesReceived.Load() >= 1
 	}, time.Second, 10*time.Millisecond)
 
-	_, err = c.Pause(true)
+	_, err = c.PauseWithUnexpectedFramesSuppressed()
 	require.NoError(t, err)
 
 	_, err = c.Play(nil)
